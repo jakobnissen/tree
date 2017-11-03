@@ -1,7 +1,5 @@
 
- module Tree
-
-import JSON
+module Tree
 
 abstract type Node end
 
@@ -27,110 +25,6 @@ mutable struct Root <: Node
     end
 end
 
-function _parsechildren(jsonparent, parent)
-    for jsonchild in jsonparent["children"]
-        if isa(jsonchild, String)
-            jsonchild = JSON.parse(jsonchild)
-        end
-        child = Child(jsonchild["name"], parent, jsonchild["length"])
-        
-        _parsechildren(jsonchild, child)
-    end
-end
-
-function json(string::T) where T <: AbstractString
-    jsonroot::Dict{String, Any} = JSON.parse(string)
-    root = Root(jsonroot["name"])
-    parsechildren(jsonroot, root)
-    return root
-end
-
-function _newickrecurser(nodestring, parent, nodearray)
-    "Recursively instantiates children of a Newick string"
-    
-    name, branchlength, stringofchildren = _getnodeinfo(nodestring)
-    
-    if isempty(name)
-        number = nodearray[1]
-        nodearray[1] = number + 1
-        name = string(number)
-    end
-    
-    child = Child(name, parent, branchlength)
-    
-    for childstring in _newicksubstrings(stringofchildren)
-        _newickrecurser(childstring, child, nodearray)
-    end
-end
-
-function _newicksubstrings(string)
-    "Given a newick tree representing zero or more children, properly splits them."
-    
-    if isempty(string)
-        return SubString{String}[]
-    end
-    
-    pars = 0
-    left = 1
-    substrings = SubString{String}[]
-    
-    for i in eachindex(string)
-        if string[i] == '('
-            pars += 1
-        elseif string[i] == ')'
-            pars -= 1
-        elseif pars == 0 && string[i] == ','
-            push!(substrings, strip(string[left: i - 1]))
-            left = i + 1
-        end
-    end
-    
-    push!(substrings, strip(string[left: length(string)]))
-    return substrings
-end
-
-function _getnodeinfo(nodestring)
-    """Gets branchlength and name and the rest of the string for the top node
-    of a Newick string"""
-    
-    rightparenpos = rsearch(nodestring, ')')
-    
-    colonpos = search(nodestring, ':', rightparenpos+1)
-    
-    if colonpos == 0
-        name = String(nodestring[rightparenpos+1:end])
-        branchlength = 0.0
-    else
-        name = String(nodestring[rightparenpos+1:colonpos-1])
-        branchlength = parse(Float64, nodestring[colonpos+1:end])
-    end
-    
-    return name, branchlength, nodestring[2:rightparenpos-1]
-end
-
-function newick(newickstring::T) where T<: AbstractString
-    "Returns the root of a tree represented by a Newick string"
-    
-    nodearray = [1]
-    
-    newickstring = rstrip(newickstring, [';', '\n'])
-    substring = SubString(newickstring, 1, length(newickstring))
-    
-    name, _, childrenstrings = _getnodeinfo(substring)
-    
-    if isempty(name)
-        name = "root"
-    end
-    
-    result = Root(name)
-    
-    for childstring in _newicksubstrings(childrenstrings)
-        _newickrecurser(childstring, result, nodearray)
-    end
-    
-    return result
-end
-
 function Base.show(io::IO, node::Root)
     print(io, "*" * node.name * "(" * join([c.name for c in node.children], ", ") * ")")
 end
@@ -139,66 +33,85 @@ function Base.show(io::IO, node::Child)
     print(io, node.name * "(" * join([c.name for c in node.children], ", ") * ")")
 end
 
-function _jsonrecurse(node::Child)
-    object = Dict{String, Any}([])
-    object["name"] = node.name
-    object["parent"] = node.parent.name
-    object["length"] = node.length
-    object["children"] = Any[]
+function Base.delete!(node::Child)
+    "Deletes a node returning it, while connecting the parent and the children of it."
     
+    length = node.length
+    parent = node.parent
+    
+    index = findfirst(parent.children, node)
+    deleteat!(parent.children, index)
+
     for child in node.children
-        push!(object["children"], _jsonrecurse(child))
+        child.length += length
+        child.parent = parent
+        
+        # Make sure the newly added children are in the same position in the
+        # children array as the old child was.
+        insert!(parent.children, index, child)
+        index += 1
     end
-    
-    return object
+
+    return node
 end
 
-function json(node::Child)
-    object = Dict{String, Any}([])
-    object["name"] = node.name
-    object["parent"] = node.parent.name
-    object["length"] = node.length
-    object["children"] = Any[]
+function insert(name, child, length)
+    "Inserts a node on a branch at 'length' distance ancestral from 'child'."
     
-    for child in node.children
-        push!(object["children"], _jsonrecurse(child))
+    if length > child.length
+        error("length is longer than the branch leading to its child")
     end
     
-    return JSON.json(object)
+    newchild = Child(name, child.parent, child.length - length)
+    
+    children = child.parent.children
+    deleteat!(children, findfirst(children, child))
+    
+    child.parent = newchild
+    child.length = length
+    
+    return newchild
 end
 
-function json(node::Root)
-    object = Dict{String, Any}([])
-    object["name"] = node.name
-    object["children"] = Any[]
+function detach!(node::Child; asroot=false)
+    """Deletes a subtree from a node, returning it.
+    If asroot, convert the given node to a root."""
     
-    for child in node.children
-        push!(object["children"], _jsonrecurse(child))
-    end
+    deleteat!(parent.children, findfirst(parent.children, node))
     
-    return JSON.json(object)
-end
-
-function newick(node::Child, asroot=true)
-    if isleaf(node)
-        return node.name * ":" * string(node.length)
-    else
-        childstrings = [newick(c, false) for c in node.children]
-        nodestring = "($(join(childstrings, ",")))$(node.name):$(node.length)"
-        if asroot
-            return nodestring * ";"
-        else
-            return nodestring
+    if asroot
+        root = Root(node.name)
+        root.children = copy(node.children)
+        
+        for child in root.children
+            child.parent = root
         end
+        
+        return root
+    else
+        return node
     end
 end
 
-function newick(node::Root)
-    childstrings = [newick(c, false) for c in node.children]
-    return "($(join(childstrings, ",")))$(node.name);"
+function namemapof(node::Node)
+    "Returns a name => node dict of all nodes in subtree"
+    
+    namemap = Dict{String, Node}(node.name=>node)
+
+    for node in descendantsof(node)
+        if node.name in keys(namemap)
+            error("name of nodes are not unique")
+        end
+        
+        namemap[node.name] = node
+    end
+    
+    return namemap
 end
 
 function isleaf(node::T) where T <: Node
+    "Returns true if node has 0 children, else false"
+    
     return isempty(node.children)
 end
 
@@ -206,7 +119,7 @@ function lineageof(node::T) where T<:Node
     "Returns an array of ancestors from the node to the root."
     
     ancestors = Node[node]
-    
+
     while isa(node, Child)
         node = node.parent
         push!(ancestors, node)
@@ -215,8 +128,21 @@ function lineageof(node::T) where T<:Node
     return ancestors
 end
 
+function childlineageof(node::Child)
+    "Returns an array of ancestors from the node to the oldest child."
+    
+    ancestors = Child[]
+
+    while isa(node, Child)
+        push!(ancestors, node)
+        node = node.parent
+    end
+    
+    return ancestors
+end
+
 function descendantsof(node::T) where T<:Node
-    "Returns an array of all children desceding from the node."
+    "Returns an array of all children descending from the node."
     
     result = copy(node.children)
     
@@ -232,15 +158,19 @@ end
 # but basically no time for these two functions.
 
 function isredundant(node::T) where T<:Node
+    "Returns true if nore or any descendant has one child, else false"
+    
     return length(node.children) == 1 || any(length(i.children) == 1 for i in descendantsof(node))
 end
 
 function ispolytomic(node::T) where T<:Node
+    "Returns true if nore or any descendant has more than two children, else false"
     return length(node.children) > 2 || any(length(i.children) > 2 for i in descendantsof(node))
 end
 
 function mrcaof(nodes::Array{T, 1}) where T<:Node
-    "Another implementation"
+    """Finds the most recent common ancestor of two nodes.
+    If the two nodes are not related, returns nothing"""
     
     lineages = [lineageof(node) for node in nodes]
     
@@ -261,7 +191,7 @@ function mrcaof(nodes::Array{T, 1}) where T<:Node
 end
 
 function distance(one::T1, two::T2, mrca::T3) where {T1<:Node, T2<:Node, T3<:Node}
-    "Finds the vertical distance between two nodes"
+    "Finds the distance between two nodes"
     dist = 0.0
     
     for leaf in (one, two)
@@ -277,6 +207,7 @@ function distance(one::T1, two::T2, mrca::T3) where {T1<:Node, T2<:Node, T3<:Nod
 end
 
 function distance(one::T1, two::T2) where {T1<:Node, T2<:Node}
+    "Finds the distance between two nodes"
     mrca = mrcaof([one, two])
     if mrca == nothing
         error("the two nodes do not share an ancestor")
@@ -285,39 +216,16 @@ function distance(one::T1, two::T2) where {T1<:Node, T2<:Node}
     return distance(one, two, mrca)
 end
 
-_sarrs(node::Child) = [node], [findfirst(node.parent.children, node)]
-_sarrs(node::Root) = copy(node.children), [i for i in 1:length(node.children)]
-
 function simplify!(node::T) where T<:Node
-    "Removes as many nodes as possible without changing topology of tree."
+    "Deletes all redundant nodes in subtree"
     
-    nodesleft, indexes = _sarrs(node)
+    while length(node.children) == 1
+        delete!(node.children[1])
+    end
     
-    # Iterate over all nodes.
-    while length(nodesleft) > 0
-        child = pop!(nodesleft)
-        childindex = pop!(indexes)
-    
+    for child in descendantsof(node)
         if length(child.children) == 1
-            parent = child.parent
-            distance = child.length
-
-            # If a string of single children are observed, go directly to last child
-            while length(child.children) == 1
-                child = child.children[1]
-                distance += child.length
-            end
-
-            # Now connect the last child to the parent directly.
-            child.parent = parent
-            child.length = distance
-            parent.children[childindex] = child
-        end
-        
-        # Now there are guaranteed not 1 child, so add these.
-        for (index, grandchild) in enumerate(child.children)
-            push!(nodesleft, grandchild)
-            push!(indexes, index)
+            delete!(child)
         end
     end
 end
@@ -377,130 +285,105 @@ function subtree(nodes::Array{T,1}) where T<:Node
     return luca
 end
 
-function furthestleaf(node::Child, backto::T, among::Array{Child,1}) where T<: Node
-    totarget = Dict{Node, Float64}()
-    current::Child = node
-    distance = 0.0
+function _recursor(array, node, length)
+    newlength = node.length + length
+    push!(array, (node, newlength))
+    for child in node.children
+        _recursor(array, child, newlength)
+    end
+end
+
+function _ndchild(node::Child, ancestors::Array{Child, 1}, withroot)
+    pairs = Tuple{Node, Float64}[]
     
-    if current != backto
-        while current.parent != backto
-            totarget[current] = distance
-            distance += current.length
-            current = current.parent
+    dist = 0.0
+    previousancestor = node
+    for i in eachindex(ancestors)
+        ancestor = ancestors[i]
+        push!(pairs, (ancestor, dist))
+        
+        if i == 1
+            for child in ancestor.children
+                _recursor(pairs, child, dist)
+            end
+        else
+            for child in filter(c->c != previousancestor, ancestor.children)
+                _recursor(pairs, child, dist)
+            end
+        end
+        
+        dist += ancestor.length
+        previousancestor = ancestor
+    end
+    
+    # Add the root is asked to
+    if withroot  
+        root::Root = ancestors[end].parent
+        push!(pairs, (root, dist))
+
+        for child in filter(c->c != ancestors[end], root.children)
+            _recursor(pairs, child, dist)
         end
     end
     
-    totarget[current] = distance
-    totarget[current.parent] = distance + current.length
-    
-    maxdistance, maxleaf = 0.0, node
-    
-    for otherleaf in among
-        if otherleaf == node
-            continue
-        end
-        
-        current = otherleaf
-        distance = 0.0
-        encountereds = [current]
-        traveleds = [0.0]
-        
-        while ~haskey(totarget, current.parent)
-            distance += current.length
-            current = current.parent
-            push!(encountereds, current)
-            push!(traveleds, distance)
-        end
-        
-        distance += current.length
-        for (encountered, traveled) in zip(encountereds, traveleds)
-            totarget[encountered] = totarget[current.parent] + (distance - traveled)
-        end
+    return pairs
+end
 
-        distance += totarget[current.parent]
-        if distance > maxdistance
-            maxdistance = distance
-            maxleaf = otherleaf
-        end
+nodedistances(node::Child) = _ndchild(node, lineageof(node, true), true)
+
+function nodedistances(node::Child, backto::Child)
+    
+    ancestors = lineageof(node, true)
+    backtoindex = findfirst(ancestors, backto)
+    if backtoindex == 0
+        error("backto must be an ancestor of node")
+    end
+    return _ndchild(node, ancestors[1:backtoindex], false)
+end
+
+function nodedistances(node::Child, backto::Root)
+    ancestors = lineageof(node, true)
+    if backto != ancestors[end].parent
+        error("backto must be an ancestor of node")
+    end
+    return _ndchild(node, ancestors, true)
+end
+
+function nodedistances(node::Root)
+    pairs = Tuple{Node, Float64}[(node, 0.0)]
+    
+    for child in node.children
+        _recursor(pairs, child, 0)
     end
     
-    return maxleaf, maxdistance
+    return pairs
 end
 
-function furthestleaf(node::Root, backto::Root, among::Array{Child,1})
-    if node != backto
-        error("node is root, backto must be same root")
+function nodedistances(node::Root, backto::Root)
+    if backto != node
+        error("backto must be an ancestor of node")
     end
-    
-    maxleaf = among[1]
-    maxdistance = 0.0
-    
-    for leaf in among
-        current::Child = leaf
-        dist = current.length
-        
-        while isa(current.parent, Child)
-            current = current.parent
-            dist += current.length
+    return nodedistances(node)
+end
+
+function _furthestleaf(node, backto)
+    leafdists::Array{Tuple{Child, Float64}} = filter(x->isleaf(x[1]), nodedistances(node, backto))
+    maxdist = -1.0
+    result = leafdists[1][1]
+    for (leaf, dist) in leafdists
+        if dist > maxdist
+            result = leaf
         end
-        
-        if dist > maxdistance
-            maxdistance = dist
-            maxleaf = leaf
-        end
-    
     end
+    return result
+end
+
+function diameter(node::T) where T <: Node
+    leafone = _furthestleaf(node, node)
+    leaftwo = _furthestleaf(leafone, node)
     
-    return maxleaf, maxdistance
-    
-end
-
-function furthestleaf(node::Child, backto::T) where T<: Node
-    leaves = filter(isleaf, descendantsof(backto))
-    return furthestleaf(node, backto, leaves)
-end
-
-function furthestleaf(node::Root, backto::Root)
-    leaves = filter(isleaf, descendantsof(backto))
-    return furthestleaf(node, backto, leaves)
-end
-
-function furthestleaf(node::Child)
-    leaves = filter(isleaf, descendantsof(node))
-    backto = lineageof(node)[end]
-    return return furthestleaf(node, backto, leaves)
-end
-
-function furthestleaf(node::Root)
-    leaves = filter(isleaf, descendantsof(node))
-    return furthestleaf(node, node, leaves)
-end
-
-function furthestleaf(node::Child, among::Array{Child,1})
-    leaves = copy(among)
-    push!(node, leaves)
-    backto = mrcaof(leaves)
-    return return furthestleaf(node, backto, among)
-end
-
-function furthestleaf(node::Root, among::Array{Child,1})
-    return furthestleaf(node, node, among)
-end
-
-function diameter(node::T) where T<:Node
-    leaves = filter(isleaf, descendantsof(node))
-    
-    if length(leaves) < 2
-        return 0.0
-    end
-    
-    startleaf = leaves[1]
-    
-    leafone, _ = furthestleaf(startleaf, node, leaves)
-    leaftwo, diameter = furthestleaf(leafone, node, leaves)
-    
-    return diameter, leafone, leaftwo
-end
+    return distance(leafone, leaftwo)
+end 
 
 function shufflenames!(node::T) where T <: Node
     descendants = descendantsof(node)
@@ -514,8 +397,56 @@ function shufflenames!(node::T) where T <: Node
     return nothing
 end
 
-export Node, Child, Root 
-export newick, json, isleaf, lineageof, descendantsof, isredundant, ispolytomic
-export simplify!, subtree, furthestleaf, diameter, shufflenames!, mrcaof, distance
+function reroot!(node::Child)
+    # Rerooting is done by reversing the lineage.
+    lineage = lineageof(node)
+    
+    # Since we reverse, lengths are now attached to the other end of the branch
+    lengths = [n.length for n in lineage[1:end-1]]
+    insert!(lengths, 1, pop!(lengths))
+    for i in eachindex(lengths)
+        lineage[i].length = lengths[i]
+    end
+    
+    # Instead of making new child and root, we swap properties of last and first node
+    child, root = lineage[1], lineage[end]
+    child.name, root.name = root.name, child.name 
+    child.children, root.children = root.children, child.children
+    
+    # When iterating, compensate for the fact that the two above "traded places"
+    lineage[1], lineage[end] = lineage[end], lineage[1]
+    
+    # Update parents and children for all
+    for i in eachindex(lineage)
+        
+        # Update parent for all but the new root and delete its previous child
+        if i == 2
+            # This is special since its previous child is the new root.
+            lineage[i].parent = lineage[1]
+            deleteat!(lineage[i].children, findfirst(lineage[i].children, lineage[end]))
+        elseif i > 2
+            lineage[i].parent = lineage[i-1]
+            deleteat!(lineage[i].children, findfirst(lineage[i].children, lineage[i-1]))
+        end
+        
+        # For all except old root, add the old parent as child
+        if i < length(lineage)
+            push!(lineage[i].children, lineage[i+1])
+        end
+        
+    end
+    
+    return root
+end
 
- end # module Tree
+include("parsetree.jl")
+
+export Node, Child, Root
+export newick, json
+export delete!, insert, detach!, namemapof, lineageof, childlineageof
+export isleaf, descendantsof, isredundant, ispolytomic, distance, nodedistances
+export simplify!, subtree, diameter, shufflenames!, mrcaof, reroot!
+
+end # module Tree
+
+

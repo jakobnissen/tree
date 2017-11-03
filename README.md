@@ -1,2 +1,3 @@
-# tree
-Rooted, directed acyclic graphs in Julia
+# Tree
+
+A Julia library for creating and manipulating trees.
