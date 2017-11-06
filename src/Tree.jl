@@ -26,11 +26,11 @@ mutable struct Root <: Node
 end
 
 function Base.show(io::IO, node::Root)
-    print(io, "*" * node.name * "(" * join([c.name for c in node.children], ", ") * ")")
+    print(io, "*$(node.name)($(join([c.name for c in node.children], ", ")))")
 end
 
 function Base.show(io::IO, node::Child)
-    print(io, node.name * "(" * join([c.name for c in node.children], ", ") * ")")
+    print(io, "$(node.name)($(join([c.name for c in node.children], ", ")))")
 end
 
 function Base.deepcopy_internal(x::Child, dict::ObjectIdDict)
@@ -100,20 +100,21 @@ function Base.delete!(node::Child)
     return node
 end
 
-function insert(name, child, length)
+function insert(name, node::Child, length)
     "Inserts a node on a branch at 'length' distance ancestral from 'child'."
     
-    if length > child.length
+    if length > node.length
         error("length is longer than the branch leading to its child")
     end
     
-    newchild = Child(name, child.parent, child.length - length)
+    newchild = Child(name, node.parent, node.length - length)
+    push!(newchild.children, node)
     
-    children = child.parent.children
-    deleteat!(children, findfirst(children, child))
+    children = node.parent.children
+    deleteat!(children, findfirst(children, node))
     
-    child.parent = newchild
-    child.length = length
+    node.parent = newchild
+    node.length = length
     
     return newchild
 end
@@ -136,6 +137,15 @@ function detach!(node::Child; asroot=false)
     else
         return node
     end
+end
+
+function move!(node::Child, parent)
+    "Moves a child to a new parent"
+    
+    siblings = node.parent.children
+    deleteat!(siblings, findfirst(siblings, node))
+    push!(parent.children, node)
+    node.parent = parent
 end
 
 function namemapof(node::Node)
@@ -488,7 +498,7 @@ include("parsetree.jl")
 
 export Node, Child, Root
 export newick, json
-export delete!, insert, detach!, namemapof, lineageof, childlineageof
+export delete!, insert, detach!, namemapof, lineageof, childlineageof, deepcopyasroot
 export isleaf, descendantsof, isredundant, ispolytomic, distance, nodedistances
 export simplify!, subtree, diameter, shufflenames!, mrcaof, reroot!
 
