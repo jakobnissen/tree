@@ -33,6 +33,51 @@ function Base.show(io::IO, node::Child)
     print(io, node.name * "(" * join([c.name for c in node.children], ", ") * ")")
 end
 
+function Base.deepcopy_internal(x::Child, dict::ObjectIdDict)
+    if haskey(dict, x)
+        return dict[x]
+    elseif isempty(dict)
+        y = Child(x.name, Root("x"), x.length)
+        y.parent = x.parent
+    else
+        y = Child(x.name, dict[x.parent], x.length)
+    end
+        
+    dict[x] = y
+    
+    for child in x.children
+        Base.deepcopy_internal(child, dict)
+    end
+    
+    return y
+end
+
+function Base.deepcopy_internal(x::Root, dict::ObjectIdDict)
+    y = Root(x.name)
+    dict[x] = y
+    
+    for child in x.children
+        Base.deepcopy_internal(child, dict)
+    end
+    
+    return y
+end
+
+function deepcopyasroot(x::Child)
+    dict = ObjectIdDict()
+    
+    y = Root(x.name)
+    dict[x] = y
+    
+    for child in x.children
+        Base.deepcopy_internal(child, dict)
+    end
+    
+    return y
+end
+
+deepcopyasroot(x::Root) = deepcopy(x)
+
 function Base.delete!(node::Child)
     "Deletes a node returning it, while connecting the parent and the children of it."
     
