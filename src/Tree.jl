@@ -384,11 +384,11 @@ function _ndchild(node::Child, ancestors::Array{Child, 1}, withroot)
     return pairs
 end
 
-nodedistances(node::Child) = _ndchild(node, lineageof(node, true), true)
+nodedistances(node::Child) = _ndchild(node, childlineageof(node))
 
 function nodedistances(node::Child, backto::Child)
     
-    ancestors = lineageof(node, true)
+    ancestors = childlineageof(node,)
     backtoindex = findfirst(ancestors, backto)
     if backtoindex == 0
         error("backto must be an ancestor of node")
@@ -397,7 +397,7 @@ function nodedistances(node::Child, backto::Child)
 end
 
 function nodedistances(node::Child, backto::Root)
-    ancestors = lineageof(node, true)
+    ancestors = childlineageof(node)
     if backto != ancestors[end].parent
         error("backto must be an ancestor of node")
     end
@@ -437,7 +437,7 @@ function diameter(node::T) where T <: Node
     leafone = _furthestleaf(node, node)
     leaftwo = _furthestleaf(leafone, node)
     
-    return distance(leafone, leaftwo)
+    return distance(leafone, leaftwo), leafone, leaftwo
 end 
 
 function shufflenames!(node::T) where T <: Node
@@ -494,6 +494,41 @@ function reroot!(node::Child)
     return root
 end
 
+function mindpointof(node::T) where T <: Node
+    "Finds the midpoint - i.e. halfway through the diameter"
+    
+    diameter, leafone, leaftwo = diameter(node)
+    radius = diameter / 2
+    mrca = mrcaof([leafone, leaftwo])
+    
+    if distance(leafone, mrca, mrca) >= radius
+        longestleaf = leafone
+    else
+        longestleaf = leaftwo
+    end
+    
+    traveled = 0.0
+    for child in childlineageof(longestleaf)
+        traveled += child.length
+        
+        if traveled > radius
+            return child, radius + child.length - traveled
+        end
+    end
+    
+    error("Should not reach this line")
+end
+
+function reroot_midpoint!(node::Root)
+    "Reroots the tree at the midpoint."
+    
+    child, distance = mindpointof(node)
+    newnode = insert(node.name, child, distance)
+    newroot = reroot!(newnode)
+    delete!(newnode)
+    return newroot
+end 
+
 include("parsetree.jl")
 
 export Node, Child, Root
@@ -501,7 +536,6 @@ export newick, json
 export delete!, insert, detach!, namemapof, lineageof, childlineageof, deepcopyasroot
 export isleaf, descendantsof, isredundant, ispolytomic, distance, nodedistances
 export simplify!, subtree, diameter, shufflenames!, mrcaof, reroot!
+export midpointof, reroot_midpoint!
 
 end # module Tree
-
-
