@@ -15,7 +15,7 @@ end
 function json(string::T) where T <: AbstractString
     jsonroot::Dict{String, Any} = JSON.parse(string)
     root = Root(jsonroot["name"])
-    parsechildren(jsonroot, root)
+    _parsechildren(jsonroot, root)
     return root
 end
 
@@ -163,6 +163,3 @@ function newick(node::Root)
     childstrings = [newick(c, false) for c in node.children]
     return "($(join(childstrings, ",")))$(node.name);"
 end
-
-
-

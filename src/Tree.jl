@@ -139,7 +139,7 @@ function detach!(node::Child; asroot=false)
     end
 end
 
-function move!(node::Child, parent)
+function move!(node::Child, parent::T) where T <: Node
     "Moves a child to a new parent"
     
     siblings = node.parent.children
@@ -148,14 +148,14 @@ function move!(node::Child, parent)
     node.parent = parent
 end
 
-function namemapof(node::Node)
+function namemapof(node::T; unique=false) where T <: Node
     "Returns a name => node dict of all nodes in subtree"
     
     namemap = Dict{String, Node}(node.name=>node)
 
     for node in descendantsof(node)
-        if node.name in keys(namemap)
-            error("name of nodes are not unique")
+        if unique && haskey(namemap, node.name)
+            error("node.name is present more than once in tree")
         end
         
         namemap[node.name] = node
@@ -494,6 +494,18 @@ function reroot!(node::Child)
     return root
 end
 
+function reroot!(node::Child, length)
+    root = lineageof(node)[end]
+    newnode = insert(root.name, node, length)
+    newroot = reroot!(newnode)
+    
+    if length(newnode.children) == 1
+        delete!(newnode)
+    end
+    
+    return newroot
+end
+
 function mindpointof(node::T) where T <: Node
     "Finds the midpoint - i.e. halfway through the diameter"
     
@@ -536,6 +548,6 @@ export newick, json
 export delete!, insert, detach!, namemapof, lineageof, childlineageof, deepcopyasroot
 export isleaf, descendantsof, isredundant, ispolytomic, distance, nodedistances
 export simplify!, subtree, diameter, shufflenames!, mrcaof, reroot!
-export midpointof, reroot_midpoint!
+export midpointof, reroot_midpoint!, move!
 
 end # module Tree
