@@ -2,6 +2,11 @@ module Tree
 
 #=
 TODO: A function that calculates if two trees are identical
+With and without considering node labels
+With and without considering node lengths
+    (can be implemented by operating on copied 0-length tree)
+
+Implement a function that calc mean distance between leaves (HOW?!?!?)
 
 =#
 
@@ -30,6 +35,9 @@ mutable struct Root <: Node
     end
 end
 
+# This funcion only exists because mutually recursive types cannot exist
+# in Julia as of 20191004, so I need some way to tell the compiler that
+# child.parent returns Union{Child, Root}, not Node
 function Base.getproperty(x::Child, sym::Symbol)
     if sym === :parent
         return getfield(x, :parent)::Union{Child, Root}
@@ -195,11 +203,13 @@ function rootof(node::Child)::Root
     end
 end
 
+siblingsof(node::Child)::Vector{Child} = node.parent.children
+
 struct DepthsFirst{T}
-    x::T
     remaining::Vector{Union{Child, T}}
-    DepthsFirst(x::T) where {T<:Node} = new{T}(x, Union{Child, T}[x])
 end
+
+DepthsFirst(x::T) where {T<:Node} = DepthsFirst{T}(Union{Child, T}[x])
 
 function Base.iterate(x::DepthsFirst, state=x)
     isempty(x.remaining) && return nothing
@@ -213,11 +223,11 @@ Base.IteratorSize(::Type{<:DepthsFirst}) = Base.SizeUnknown()
 Base.eltype(::Type{DepthsFirst{T}}) where T = Union{T, Child}
 
 struct BreadthFirst{T}
-    start::T
     currentlevel::Vector{Union{Child, T}}
     nextlevel::Vector{Union{Child, T}}
-    BreadthFirst(x::T) where {T<:Node} = new{T}(x, Union{Child, T}[x], Union{Child, T}[])
 end
+
+BreadthFirst(x::T) where {T<:Node} = BreadthFirst{T}(Union{Child, T}[x], Union{Child, T}[])
 
 function Base.iterate(x::BreadthFirst, state=x)
     if isempty(x.currentlevel)
@@ -234,13 +244,81 @@ Base.IteratorEltype(::Type{<:BreadthFirst}) = Base.HasEltype()
 Base.IteratorSize(::Type{<:BreadthFirst}) = Base.SizeUnknown()
 Base.eltype(::Type{BreadthFirst{T}}) where T = Union{T, Child}
 
-subtreeof(node::Node) = DepthsFirst(node)
-descendantsof(node::Node) = iterate(DepthsFirst(node))[2]
-isleaf(node::Node) = isempty(node.children)
-isredundant(node::Node) = any(length(i.children) == 1 for i in subtreeof(node))
-ispolytomic(node::Node) = any(length(i.children) > 2 for i in subtreeof(node))
+struct GenerationIterator{T}
+    currentlevel::Vector{Union{Child, T}}
+end
 
-function mrcaof(nodes::Array{T, 1}) where T<:Node
+function GenerationIterator(x::T) where {T<:Node}
+    return GenerationIterator{T}(Union{Child, T}[x])
+end
+
+function Base.iterate(x::GenerationIterator, state=x)
+    isempty(x.currentlevel) && return nothing
+    res = copy(x.currentlevel)
+    empty!(x.currentlevel)
+    for i in res
+        append!(x.currentlevel, i.children)
+    end
+    return (res, x)
+end
+
+Base.IteratorEltype(::Type{<:GenerationIterator}) = Base.HasEltype()
+Base.IteratorSize(::Type{<:GenerationIterator}) = Base.SizeUnknown()
+Base.eltype(::Type{GenerationIterator{T}}) where T = Vector{Union{T, Child}}
+
+generationsof(x::Node) = GenerationIterator(x)
+
+nextgenerations(node::Node) = GenerationIterator{Child}(copy(node.children))
+
+subtreeof(node::Node) = DepthsFirst(node)
+descendantsof(node::Node) = DepthsFirst{Child}(copy(node.children))
+
+isleaf(node::Node) = isempty(node.children)
+
+function isredundant(node::Node)
+    # Use descendantsof not subtree of because type stability
+    length(node.children) == 1 && return true
+    return any(length(i.children) == 1 for i in descendantsof(node))
+end
+
+function ispolytomic(node::Node)
+    # Use descendantsof not subtree of because type stability
+    length(node.children) > 2 && return true
+    return any(length(i.children) > 2 for i in descendantsof(node))
+end
+
+function mrcaof(nodes::Vector{Root})
+    isempty(nodes) && error("empty vector")
+    root = first(nodes)
+    length(nodes) == 1 && return root
+    return any(nodes[i] !== root for i in 2:length(nodes)) ? nothing : root
+end
+
+
+function mrcaof(nodes::Vector{Node})
+    roots = Vector{Root}()
+    children = Vector{Children}()
+    for node in nodes
+        (node isa Root) ? push!(roots, node) : push!(children, node)
+    end
+    if length(roots) == 0
+        return mrcaof(children)
+    end
+    root = first(roots)
+    if length(roots) > 1 && any(roots[i] !== root for i in 2:length(roots))
+        return nothing
+    end
+    if all(rootof(child) === root for child in children)
+        return root
+    else
+        return nothing
+    end
+end
+
+function mrcaof(nodes::Vector{Child})
+    isempty(nodes) && error("empty vector")
+    length(nodes) == 1 && return @inbounds nodes[1]
+    length(nodes) == 2 && return mrcaof((@inbounds nodes[1]), (@inbounds nodes[2]))
     lineages = [collect(lineageof(node)) for node in nodes]
     minlength = minimum(map(length, lineages))
     generations = Array{Node}(undef, (length(nodes), minlength))
@@ -251,14 +329,14 @@ function mrcaof(nodes::Array{T, 1}) where T<:Node
 
     for generation in 1:minlength
         base = generations[1, generation]
-        if all(i == base for i in generations[:, generation])
+        if all(i === base for i in generations[:, generation])
             return base
         end
     end
     return nothing
 end
 
-mrcaof(one::Child, two::Root) = rootof(one) === two ? two : nothing
+mrcaof(one::Node, two::Root) = rootof(one) === two ? two : nothing
 mrcaof(one::Root, two::Child) = mrcaof(two, one)
 function mrcaof(one::Child, two::Child)
     lin1, lin2 = collect(lineageof(one)), collect(lineageof(two))
@@ -275,6 +353,8 @@ function mrcaof(one::Child, two::Child)
     end
     return nothing
 end
+
+treelength(node::Node) = sum(c.length for c in descendantsof(node))
 
 function distance(one::Node, two::Node, mrca::Node)
     "Finds the distance between two nodes"
@@ -301,13 +381,13 @@ function distance(one::T1, two::T2) where {T1<:Node, T2<:Node}
 end
 
 function simplify!(node::T) where T<:Node
-    "Deletes all redundant nodes in subtree"
-    for child in subtreeof(node)
+    "Deletes all redundant nodes in subtree, never deletes self"
+    for child in descendantsof(node)
         length(child.children) == 1 && delete!(child)
     end
 end
 
-function subtree(nodes::Array{T,1}) where T<:Node
+function subtree(nodes::Vector{<:Node})
     """Creates a new tree with the same topology, lengths and names, including
     only the nodes given and the ancestors necessary to keep topology same."""
 
@@ -435,7 +515,7 @@ function nodedistances(node::Root)
 end
 
 function nodedistances(node::Root, backto::Root)
-    if backto != node
+    if backto !== node
         error("backto must be an ancestor of node")
     end
     return nodedistances(node)
@@ -453,14 +533,101 @@ function _furthestleaf(node, backto)
     return result
 end
 
-function diameter(node::T) where T <: Node
+@inline npairs(n::Int) = (n* (n-1)) >>> 1
+
+function update(node, cache)
+    @inbounds begin
+    nchildren = length(node.children)
+    if nchildren == 0
+        return (1, 0.0, 0.0)
+    elseif nchildren == 1
+        child = node.children[1]
+        value = cache[child]
+        return (value[1], value[2], value[3] + child.length)
+    # This update2 should return the same as the function body below, but more
+    # efficiently
+    elseif nchildren == 2
+        return update2(node, cache)
+    end
+
+    # We cache this to avoid looking up in the dictionary tonnes of times
+    childdata = Vector{Tuple{Int, Float64, Float64, Float64}}(undef, nchildren)
+    for i in 1:nchildren
+        child = node.children[i]
+        value = cache[child]
+        childdata[i] = (value[1], value[2], value[3], child.length)
+    end
+
+    # Here, we calculate the mean internal path distance to all the leaves
+    sumd = 0.0
+    npaths = 0
+    for i in 1:nchildren
+        # First add the paths within each child's leaves
+        np = npairs(childdata[i][1])
+        npaths += np
+        sumd += np * childdata[i][2]
+        # Then add the paths between the children
+        for j in (i+1):nchildren
+            np = childdata[i][1] * childdata[j][1]
+            npaths += np
+            sumd += np * (childdata[i][3] + childdata[i][4] + childdata[j][3] + childdata[j][4])
+        end
+    end
+    internal = sumd / npaths
+
+    # Calculate mean distances
+    npaths = 0
+    sumd = 0.0
+    for i in 1:nchildren
+        np = childdata[i][1]
+        npaths += np
+        sumd += np * (childdata[i][3] + childdata[i][4])
+    end
+    meandist = sumd / npaths
+    end # inbounds
+    return (npaths, internal, meandist)
+end
+
+function update2(node, cache)
+    @inbounds begin
+    child1, child2 = node.children[1], node.children[2]
+    L1, L2 = child1.length, child2.length
+    v1, v2 = cache[child1], cache[child2]
+    N1, N2 = v1[1], v2[1]
+    I1, I2 = v1[2], v2[2]
+    D1, D2 = v1[3], v2[3]
+
+    N = N1 + N2
+    I = (npairs(N1)*I1 + npairs(N2)*I2 + N1*N2*(D1+D2+L1+L2)) / (npairs(N1) + npairs(N2) + N1*N2)
+    D = (N1*(D1+L1) + N2*(D2+L2)) / N
+    end # inbounds
+    return (N, I, D)
+end
+
+function meandistance(node::Node)
+    # We keep track of 3 properties for each node:
+    # 1) Number of leaves descendants, 2) Mean internal distance between leaves
+    # 3) Mean distance from leaf to the node
+    cache = Dict{Child, Tuple{Int, Float64, Float64}}()
+    generations = reverse!(collect(nextgenerations(node)))
+    # We then iteratively merge siblings together WITHOUT needing to visit
+    # all the sibling's descendants.
+    for generation in generations
+        for child in generation
+            cache[child] = update(child, cache)
+        end
+    end
+    return update(node, cache)[2]
+end
+
+function diameter(node::Node)
     leafone = _furthestleaf(node, node)
     leaftwo = _furthestleaf(leafone, node)
 
     return distance(leafone, leaftwo), leafone, leaftwo
 end
 
-function shufflenames!(node::T) where T <: Node
+function shufflenames!(node::Node)
     descendants = descendantsof(node)
     names = [child.name for child in descendants]
     shuffle!(names)
@@ -537,7 +704,7 @@ function reroot!(node::Child, length::Number)
     return newroot
 end
 
-function midpointof(node::T) where T <: Node
+function midpointof(node::Node)
     "Finds the midpoint - i.e. halfway through the diameter"
 
     diameter, leafone, leaftwo = diameter(node)
@@ -618,15 +785,16 @@ export Node, Child, Root,
     delete!, insert, detach!, move!,
     # Transversal
     lineageof, childlineageof, rootof, descendantsof, subtreeof, mrcaof,
+    DepthsFirst, BreadthFirst, generationsof, nextgenerations,
     # Boolean
     isredundant, ispolytomic, isleaf,
     # Metrics
-    distance, nodedistances, diameter, midpointof,
+    distance, nodedistances, diameter, midpointof, treelength, meandistance,
     # Whole-tree rearrangements
     simplify!, shufflenames!, reroot!, reroot_midpoint!
     # Methods returning new trees
     subtree,
     # Misc
-    namemapof,
+    namemapof
 
 end # module Tree
