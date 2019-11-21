@@ -1,14 +1,35 @@
 module Tree
 
 #=
-TODO: A function that calculates if two trees are identical
+TODO: Re-implement nodistances and diameter. It's WRONG and slow.
+
+
+A function that calculates if two trees are identical
 With and without considering node labels
 With and without considering node lengths
     (can be implemented by operating on copied 0-length tree)
-
-Implement a function that calc mean distance between leaves (HOW?!?!?)
-
 =#
+
+struct Pairs{T}
+    x::Vector{T}
+end
+
+function Base.iterate(x::Pairs, state::Tuple{Int,Int}=(1,2))
+    ai, bi = state
+    len = length(x.x)
+    if bi > len
+        ai += 1
+        bi = ai + 1
+    end
+    bi > len && return nothing
+    val = @inbounds (x.x[ai], x.x[bi])
+    return val, (ai, bi+1)
+end
+
+Base.IteratorSize(::Type{Pairs}) = Base.HasLength()
+Base.IteratorEltype(::Type{Pairs}) = Base.HasEltype()
+Base.eltype(::Type{Pairs{T}}) where T = Tuple{T, T}
+Base.length(x::Pairs) = (length(x.x) * (length(x.x)-1)) >>> 1
 
 abstract type Node end
 
@@ -96,7 +117,7 @@ end
 deepcopyasroot(x::Root) = deepcopy(x)
 
 function removechild!(child::Child)
-    deleteat!(child.parent, findfirst(isequal(child), child.parent.children))
+    deleteat!(child.parent.children, findfirst(isequal(child), child.parent.children))
 end
 
 function Base.delete!(node::Child)
@@ -161,11 +182,11 @@ function namemapof(node::T; unique=true) where T <: Node
     "Returns a name => node dict of all nodes in subtree"
 
     namemap = Dict{String, Node}(node.name=>node)
-    for node in DepthsFirst(node)
-        if unique && haskey(namemap, node.name)
-            error("node.name is present more than once in tree")
+    for child in descendantsof(node)
+        if unique && haskey(namemap, child.name)
+            error("$(node.name) is present more than once in tree")
         end
-        namemap[node.name] = node
+        namemap[child.name] = child
     end
     return namemap
 end
@@ -274,6 +295,8 @@ subtreeof(node::Node) = DepthsFirst(node)
 descendantsof(node::Node) = DepthsFirst{Child}(copy(node.children))
 
 isleaf(node::Node) = isempty(node.children)
+leavesof(node::Child) = (child for child in subtreeof(node) if isleaf(child))
+leavesof(node::Root) = (child for child in descendantsof(node) if isleaf(child))
 
 function isredundant(node::Node)
     # Use descendantsof not subtree of because type stability
@@ -296,6 +319,7 @@ end
 
 
 function mrcaof(nodes::Vector{Node})
+    length(nodes) == 1 && return first(nodes)
     roots = Vector{Root}()
     children = Vector{Children}()
     for node in nodes
@@ -380,6 +404,7 @@ function distance(one::T1, two::T2) where {T1<:Node, T2<:Node}
     return distance(one, two, mrca)
 end
 
+
 function simplify!(node::T) where T<:Node
     "Deletes all redundant nodes in subtree, never deletes self"
     for child in descendantsof(node)
@@ -388,58 +413,50 @@ function simplify!(node::T) where T<:Node
 end
 
 function subtree(nodes::Vector{<:Node})
-    """Creates a new tree with the same topology, lengths and names, including
-    only the nodes given and the ancestors necessary to keep topology same."""
-
     if isempty(nodes)
         error("no nodes given")
+    elseif length(nodes) == 1
+        return Root(first(nodes.name))
     end
 
+    mrca = mrcaof(nodes)
+    if mrca === nothing
+        throw(ArgumentError("Not all nodes are related"))
+    end
+    root = Root(mrca.name)
     copyof = Dict{Node, Node}()
-    lineage = reverse!(collect(lineageof(nodes[1])))
-
-    # Create the root which is returned
-    luca = Root(lineage[1].name)
-    copyof[lineage[1]] = luca
+    copyof[mrca] = root
 
     # For the first node, create all the rest of the lineage
-    for template in lineage[2:end]
-        copy = Child(template.name, copyof[template.parent], template.length)
-        copyof[template] = copy
+    for template in reverse!(collect(childlineageof(first(nodes))))
+        copyof[template] = Child(template.name, copyof[template.parent], template.length)
     end
 
     # For each subsequent node
+    lineage = Child[]
     for node in nodes[2:end]
-        lineage = Child[]
-
+        empty!(lineage)
         # While the ancestors have never been seen, keep getting more distanct
         # ancestors
-        while !haskey(copyof, node)
-            push!(lineage, node)
-            node = node.parent
-
-            # If hit a root, if it is the same root, stop, if it is another root,
-            # raise an error as the nodes do not share a common ancestor
-            if isa(node, Root)
-                if ~haskey(copyof, node)
-                    error("Not all nodes share an ancestor")
-                else
-                    break
-                end
+        for template in childlineageof(node)
+            if haskey(copyof, template)
+                break
             end
+            push!(lineage, template)
         end
 
         # Now instantiate all these unseen ancestors
-        for template in reverse(lineage)
-            copy = Child(template.name, copyof[template.parent], template.length)
-            copyof[template] = copy
+        for template in reverse!(lineage)
+            copyof[template] = Child(template.name, copyof[template.parent], template.length)
         end
     end
 
-    # Lastly, remove all the one-children nodes.
-    simplify!(luca)
-    return luca
+    simplify!(root)
+    return root
 end
+
+# distance
+# nodedistances
 
 function _recursor(array, node, length)
     newlength = node.length + length
@@ -533,9 +550,17 @@ function _furthestleaf(node, backto)
     return result
 end
 
-@inline npairs(n::Int) = (n* (n-1)) >>> 1
+function diameter(node::Node)
+    leafone = _furthestleaf(node, node)
+    leaftwo = _furthestleaf(leafone, node)
 
-function update(node, cache)
+    return distance(leafone, leaftwo), leafone, leaftwo
+end
+
+
+@inline npairs(n::Int) = (n * (n-1)) >>> 1
+
+function _update(node, cache)
     @inbounds begin
     nchildren = length(node.children)
     if nchildren == 0
@@ -544,13 +569,35 @@ function update(node, cache)
         child = node.children[1]
         value = cache[child]
         return (value[1], value[2], value[3] + child.length)
-    # This update2 should return the same as the function body below, but more
-    # efficiently
+    # These next two do the same thing, but the first one is faster for nchildren == 2
     elseif nchildren == 2
-        return update2(node, cache)
+        return _update2(node, cache)
+    else
+        return _updaten(node, cache, nchildren)
     end
+    end # inbounds
+end
 
+function _update2(node, cache)
+    # See comments in _updaten
+    @inbounds begin
+    child1, child2 = node.children[1], node.children[2]
+    L1, L2 = child1.length, child2.length
+    v1, v2 = cache[child1], cache[child2]
+    N1, N2 = v1[1], v2[1]
+    I1, I2 = v1[2], v2[2]
+    D1, D2 = v1[3], v2[3]
+
+    N = N1 + N2
+    I = (npairs(N1)*I1 + npairs(N2)*I2 + N1*N2*(D1+D2+L1+L2)) / (npairs(N1) + npairs(N2) + N1*N2)
+    D = (N1*(D1+L1) + N2*(D2+L2)) / N
+    end # inbounds
+    return (N, I, D)
+end
+
+function _updaten(node, cache, nchildren)
     # We cache this to avoid looking up in the dictionary tonnes of times
+    @inbounds begin
     childdata = Vector{Tuple{Int, Float64, Float64, Float64}}(undef, nchildren)
     for i in 1:nchildren
         child = node.children[i]
@@ -588,22 +635,6 @@ function update(node, cache)
     return (npaths, internal, meandist)
 end
 
-function update2(node, cache)
-    @inbounds begin
-    child1, child2 = node.children[1], node.children[2]
-    L1, L2 = child1.length, child2.length
-    v1, v2 = cache[child1], cache[child2]
-    N1, N2 = v1[1], v2[1]
-    I1, I2 = v1[2], v2[2]
-    D1, D2 = v1[3], v2[3]
-
-    N = N1 + N2
-    I = (npairs(N1)*I1 + npairs(N2)*I2 + N1*N2*(D1+D2+L1+L2)) / (npairs(N1) + npairs(N2) + N1*N2)
-    D = (N1*(D1+L1) + N2*(D2+L2)) / N
-    end # inbounds
-    return (N, I, D)
-end
-
 function meandistance(node::Node)
     # We keep track of 3 properties for each node:
     # 1) Number of leaves descendants, 2) Mean internal distance between leaves
@@ -614,17 +645,10 @@ function meandistance(node::Node)
     # all the sibling's descendants.
     for generation in generations
         for child in generation
-            cache[child] = update(child, cache)
+            cache[child] = _update(child, cache)
         end
     end
-    return update(node, cache)[2]
-end
-
-function diameter(node::Node)
-    leafone = _furthestleaf(node, node)
-    leaftwo = _furthestleaf(leafone, node)
-
-    return distance(leafone, leaftwo), leafone, leaftwo
+    return _update(node, cache)[2]
 end
 
 function shufflenames!(node::Node)
@@ -637,6 +661,75 @@ function shufflenames!(node::Node)
     end
 
     return nothing
+end
+
+#= This function does two things:
+1) Updated leafdistances for a node using the leafdistances of its children
+2) Returns an array of one array per child, each containing the leaves of that child,
+and the distance to the node. The distance between the leaves are then the sum of all leaves
+across two of these inner arrays
+=#
+function _update_dist_parent!(node::Node, leafdistances::Dict{Node, Vector{Tuple{Int, Float64}}},
+                              indexof::Dict{Child,Int})
+    node_leafdistances = valtype(leafdistances)()
+    dists_by_child = valtype(leafdistances)[]
+    for child in node.children
+        child_distances = valtype(leafdistances)()
+        push!(dists_by_child, child_distances)
+
+        # If child is leaf, it's not in leafdistances, but it leaves are just itself
+        if isleaf(child)
+            val = (indexof[child], child.length)
+            push!(node_leafdistances, val)
+            push!(child_distances, val)
+        # Else, for each of its leaves, we add the length of the child
+        else
+            for (leafindex, dist) in leafdistances[child]
+                val = (leafindex, dist + child.length)
+                push!(node_leafdistances, val)
+                push!(child_distances, val)
+            end
+            pop!(leafdistances, child)
+        end
+    end
+    leafdistances[node] = node_leafdistances
+    return dists_by_child
+end
+
+function _write_distances!(dists::Matrix{Float64}, dists_by_child::Vector{Vector{Tuple{Int, Float64}}})
+    @inbounds for (vec1, vec2) in Pairs(dists_by_child)
+        for (index1, dist1) in vec1, (index2, dist2) in vec2
+            # This is distance from leaf A to node + distance from leaf B to node
+            dist = dist1 + dist2
+            dists[index1, index2] = dist
+            dists[index2, index1] = dist
+        end
+    end
+end
+
+#= Algorithm: Start from youngest leaves, moving up to the MRCA. Along the way,
+keep track of the distance to the node you're at from all its leaf descendants.
+Every time you reach a new node, that node is the MRCA of leaf descendants of two different
+children, and you already got the distance from those leaves to the node, so just add them.
+=#
+function distance_matrix(nodes::Vector{Child})
+    all(isleaf, nodes) || throw(ArgumentError("All nodes must be leaves"))
+    # This dict is node => [(index, dist_from_leaf_to_node) ..] for all node's leaves
+    leafdistances = Dict{Node, Vector{Tuple{Int, Float64}}}()
+    mrca = mrcaof(nodes)
+    generations = reverse!(collect(generationsof(mrca)))
+    result = zeros(length(nodes), length(nodes))
+    indexof = Dict(i=>n for (n,i) in enumerate(nodes))
+    # Start at youngest generation, skipping first that only has leaves
+    for generation in generations[2:end]
+        for node in generation
+            if !isleaf(node)
+                dists_by_child = _update_dist_parent!(node, leafdistances, indexof)
+                _write_distances!(result, dists_by_child)
+            end
+        end
+    end
+    return result
 end
 
 reroot!(root::Root) = root
@@ -785,13 +878,14 @@ export Node, Child, Root,
     delete!, insert, detach!, move!,
     # Transversal
     lineageof, childlineageof, rootof, descendantsof, subtreeof, mrcaof,
-    DepthsFirst, BreadthFirst, generationsof, nextgenerations,
+    DepthsFirst, BreadthFirst, generationsof, nextgenerations, leavesof,
     # Boolean
     isredundant, ispolytomic, isleaf,
     # Metrics
     distance, nodedistances, diameter, midpointof, treelength, meandistance,
+    distance_matrix,
     # Whole-tree rearrangements
-    simplify!, shufflenames!, reroot!, reroot_midpoint!
+    simplify!, shufflenames!, reroot!, reroot_midpoint!,
     # Methods returning new trees
     subtree,
     # Misc
